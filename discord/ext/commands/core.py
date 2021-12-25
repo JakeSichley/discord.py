@@ -35,6 +35,7 @@ import discord
 from .errors import *
 from .cooldowns import Cooldown, BucketType, CooldownMapping, MaxConcurrency
 from . import converter as converters
+from . import default as defaults
 from ._types import _BaseCommand
 from .cog import Cog
 
@@ -507,11 +508,26 @@ class Command(_BaseCommand):
     def _get_converter(self, param):
         converter = param.annotation
         if converter is param.empty:
-            if param.default is not param.empty:
-                converter = str if param.default is None else type(param.default)
-            else:
+            if param.default is param.empty or param.default is None:
                 converter = str
+            elif (inspect.isclass(param.default) and issubclass(param.default, defaults.CustomDefault)) or isinstance(param.default, defaults.CustomDefault):
+                converter = typing.Union[param.default.converters]
+            else:
+                converter = type(param.default)
         return converter
+
+    async def _resolve_default(self, ctx, param):
+        try:
+            if inspect.isclass(param.default) and issubclass(param.default, defaults.CustomDefault):
+                instance = param.default()
+                return await instance.default(ctx=ctx, param=param)
+            elif isinstance(param.default, defaults.CustomDefault):
+                return await param.default.default(ctx=ctx, param=param)
+        except CommandError as e:
+            raise e
+        except Exception as e:
+            raise ConversionError(param.default, e) from e
+        return param.default
 
     async def transform(self, ctx, param):
         required = param.default is param.empty
@@ -540,7 +556,7 @@ class Command(_BaseCommand):
                 if self._is_typing_optional(param.annotation):
                     return None
                 raise MissingRequiredArgument(param)
-            return param.default
+            return await self._resolve_default(ctx, param)
 
         previous = view.index
         if consume_rest_is_special:
@@ -569,7 +585,7 @@ class Command(_BaseCommand):
                 result.append(value)
 
         if not result and not required:
-            return param.default
+            return await self._resolve_default(ctx, param)
         return result
 
     async def _transform_greedy_var_pos(self, ctx, param, converter):
@@ -582,7 +598,7 @@ class Command(_BaseCommand):
             view.index = previous
             raise RuntimeError() from None # break loop
         else:
-            return value
+            return value or await self._resolve_default(ctx, param)
 
     @property
     def clean_params(self):
